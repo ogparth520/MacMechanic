@@ -24,6 +24,8 @@ class CPUMonitor: ObservableObject {
     let pCoreCount: Int
     let eCoreCount: Int
 
+    private let hostPort: host_t
+    private let agxService: io_service_t
     private var timer: Timer?
     private let bgQueue = DispatchQueue(label: "com.macmechanic.cpu", qos: .utility)
     private var prevTicks: [UInt32] = []
@@ -33,11 +35,18 @@ class CPUMonitor: ObservableObject {
     private init() {
         pCoreCount = CPUMonitor.sysctlInt("hw.perflevel0.physicalcpu")
         eCoreCount = CPUMonitor.sysctlInt("hw.perflevel1.physicalcpu")
+        hostPort   = mach_host_self()
+        agxService = IOServiceGetMatchingService(kIOMainPortDefault,
+                                                 IOServiceMatching("AGXAccelerator"))
         bgQueue.async { [weak self] in
             let name = CPUMonitor.buildGPUModelName()
             DispatchQueue.main.async { self?.gpuModelName = name }
         }
         startTimer()
+    }
+
+    deinit {
+        if agxService != IO_OBJECT_NULL { IOObjectRelease(agxService) }
     }
 
     private static func buildGPUModelName() -> String {
@@ -83,7 +92,7 @@ class CPUMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }
@@ -109,7 +118,7 @@ class CPUMonitor: ObservableObject {
         var infoPtr: processor_info_array_t?
         var infoCount: mach_msg_type_number_t = 0
 
-        guard host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO,
+        guard host_processor_info(hostPort, PROCESSOR_CPU_LOAD_INFO,
                                   &numCPU, &infoPtr, &infoCount) == KERN_SUCCESS,
               let info = infoPtr else { return }
 
@@ -168,10 +177,10 @@ class CPUMonitor: ObservableObject {
 
         let pCount = min(pCoreCount, coreCount)
         let eCount = min(eCoreCount, coreCount - pCount)
-        let pUsages = Array(coreUsages.prefix(pCount))
-        let eUsages = Array(coreUsages.dropFirst(pCount).prefix(eCount))
-        let pAvg = pUsages.isEmpty ? 0 : pUsages.reduce(0, +) / Double(pUsages.count)
-        let eAvg = eUsages.isEmpty ? 0 : eUsages.reduce(0, +) / Double(eUsages.count)
+        let pSlice = coreUsages.prefix(pCount)
+        let eSlice = coreUsages.dropFirst(pCount).prefix(eCount)
+        let pAvg = pSlice.isEmpty ? 0 : pSlice.reduce(0, +) / Double(pSlice.count)
+        let eAvg = eSlice.isEmpty ? 0 : eSlice.reduce(0, +) / Double(eSlice.count)
 
         let totalAll = sumUser + sumSys + sumIdle + sumNice
         let sysPct  = totalAll > 0 ? Double(sumSys) / Double(totalAll) * 100 : 0
@@ -190,13 +199,10 @@ class CPUMonitor: ObservableObject {
     }
 
     private func fetchGPU() {
-        let service = IOServiceGetMatchingService(kIOMainPortDefault,
-                                                  IOServiceMatching("AGXAccelerator"))
-        guard service != IO_OBJECT_NULL else { return }
-        defer { IOObjectRelease(service) }
+        guard agxService != IO_OBJECT_NULL else { return }
 
         var props: Unmanaged<CFMutableDictionary>? = nil
-        IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0)
+        IORegistryEntryCreateCFProperties(agxService, &props, kCFAllocatorDefault, 0)
         guard let dict = props?.takeRetainedValue() as? [String: Any],
               let perfStats = dict["PerformanceStatistics"] as? [String: Any] else { return }
 

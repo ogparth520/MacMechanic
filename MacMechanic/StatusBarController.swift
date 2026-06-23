@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-final class StatusBarController: NSObject, NSPopoverDelegate {
+final class StatusBarController: NSObject {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private let monitor = MemoryMonitor.shared
@@ -49,7 +49,6 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         popover.animates = false
         popover.behavior = .transient
         popover.appearance = NSAppearance(named: .darkAqua)
-        popover.delegate = self
         popover.contentViewController = hostingVC
     }
 
@@ -83,5 +82,4 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    // MARK: NSPopoverDelegate
 }

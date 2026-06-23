@@ -4,6 +4,7 @@ import IOKit.ps
 
 class BatteryMonitor: ObservableObject {
     static let shared = BatteryMonitor()
+
     @Published var chargePercent: Int = 0
     @Published var chargingStatus: String = "--"
     @Published var healthPercent: Double = 0
@@ -17,14 +18,45 @@ class BatteryMonitor: ObservableObject {
 
     private var timer: Timer?
     private let bgQueue = DispatchQueue(label: "com.macmechanic.battery", qos: .utility)
+    private let batteryService: io_service_t
+
+    // Change detection — only accessed on bgQueue
+    private var lastCharge: Int = -1
+    private var lastStatus: String = ""
+    private var lastTime: String = ""
+    private var lastWatts: Double = -1
+    private var lastCharging: Bool = false
+    private var lastPresent: Bool = false
+
+    var isPaused: Bool = false
 
     private init() {
+        batteryService = IOServiceGetMatchingService(kIOMainPortDefault,
+                                                     IOServiceMatching("AppleSmartBattery"))
+        // Static fields: health, capacity, cycles never change during a session
+        if batteryService != IO_OBJECT_NULL {
+            var props: Unmanaged<CFMutableDictionary>? = nil
+            IORegistryEntryCreateCFProperties(batteryService, &props, kCFAllocatorDefault, 0)
+            if let dict = props?.takeRetainedValue() as? [String: Any] {
+                let nominal = dict["NominalChargeCapacity"] as? Int ?? 0
+                let design  = dict["DesignCapacity"] as? Int ?? 0
+                nominalCapacityMAh = nominal
+                designCapacityMAh  = design
+                cycleCount         = dict["CycleCount"] as? Int ?? 0
+                healthPercent      = design > 0
+                    ? min(Double(nominal) / Double(design) * 100, 100.0) : 0
+            }
+        }
         startTimer()
+    }
+
+    deinit {
+        if batteryService != IO_OBJECT_NULL { IOObjectRelease(batteryService) }
     }
 
     func startTimer() {
         fetchStats()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 11.9, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }
@@ -33,8 +65,6 @@ class BatteryMonitor: ObservableObject {
         timer?.invalidate()
         timer = nil
     }
-
-    var isPaused: Bool = false
 
     func fetchStats() {
         guard !isPaused else { return }
@@ -61,68 +91,65 @@ class BatteryMonitor: ObservableObject {
                 }
             }
 
-            // ── AppleSmartBattery: all other stats ────────────────────────────
-            var healthPercent = 0.0
+            // ── AppleSmartBattery: dynamic fields only (cached service) ───────
             var chargingStatus = "--"
             var timeStr = "--"
             var charging = false
-            var cycleCount = 0
-            var maxMAh = 0
-            var designMAh = 0
             var powerWatts = 0.0
 
-            let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-            var props: Unmanaged<CFMutableDictionary>? = nil
-            IORegistryEntryCreateCFProperties(service, &props, kCFAllocatorDefault, 0)
-            let dict = props?.takeRetainedValue() as? [String: Any]
-            let nominalChargeCapacity = dict?["NominalChargeCapacity"] as? Int ?? 0
-            let designCapacity = dict?["DesignCapacity"] as? Int ?? 0
-            let health = designCapacity > 0 ? min((Double(nominalChargeCapacity) / Double(designCapacity)) * 100, 100.0) : 0
-            IOObjectRelease(service)
+            if self.batteryService != IO_OBJECT_NULL {
+                var props: Unmanaged<CFMutableDictionary>? = nil
+                IORegistryEntryCreateCFProperties(self.batteryService, &props, kCFAllocatorDefault, 0)
+                if let dict = props?.takeRetainedValue() as? [String: Any] {
+                    func intVal(_ key: String) -> Int {
+                        (dict[key] as? NSNumber)?.intValue ?? 0
+                    }
+                    let isCharging        = dict["IsCharging"] as? Bool ?? false
+                    let externalConnected = dict["ExternalConnected"] as? Bool ?? false
+                    charging = isCharging
 
-            healthPercent = health
-            maxMAh        = nominalChargeCapacity
-            designMAh     = designCapacity
+                    if isCharging {
+                        chargingStatus = "Charging"
+                        let mins = intVal("AvgTimeToFull")
+                        timeStr = mins > 0 && mins < 65535 ? Self.formatMinutes(mins) : "Calculating…"
+                    } else if externalConnected {
+                        chargingStatus = "AC Power"
+                        timeStr = "--"
+                    } else {
+                        chargingStatus = "Discharging"
+                        let mins = intVal("AvgTimeToEmpty")
+                        timeStr = mins > 0 && mins < 65535 ? Self.formatMinutes(mins) : "Calculating…"
+                    }
 
-            if let dict {
-                func intVal(_ key: String) -> Int {
-                    (dict[key] as? NSNumber)?.intValue ?? 0
+                    let amperage = dict["Amperage"] as? Int ?? 0
+                    let voltage  = dict["Voltage"] as? Int ?? 0
+                    powerWatts   = abs(Double(amperage) * Double(voltage)) / 1_000_000.0
                 }
-
-                let isCharging        = dict["IsCharging"] as? Bool ?? false
-                let externalConnected = dict["ExternalConnected"] as? Bool ?? false
-                charging = isCharging
-
-                if isCharging {
-                    chargingStatus = "Charging"
-                    let mins = intVal("AvgTimeToFull")
-                    timeStr = mins > 0 && mins < 65535 ? Self.formatMinutes(mins) : "Calculating…"
-                } else if externalConnected {
-                    chargingStatus = "AC Power"
-                    timeStr = "--"
-                } else {
-                    chargingStatus = "Discharging"
-                    let mins = intVal("AvgTimeToEmpty")
-                    timeStr = mins > 0 && mins < 65535 ? Self.formatMinutes(mins) : "Calculating…"
-                }
-
-                cycleCount = intVal("CycleCount")
-                let amperage = dict["Amperage"] as? Int ?? 0
-                let voltage  = dict["Voltage"] as? Int ?? 0
-                powerWatts   = abs(Double(amperage) * Double(voltage)) / 1_000_000.0
             }
 
+            // ── Change detection ──────────────────────────────────────────────
+            let changed = chargePercent != self.lastCharge
+                       || chargingStatus != self.lastStatus
+                       || timeStr != self.lastTime
+                       || abs(powerWatts - self.lastWatts) > 0.05
+                       || charging  != self.lastCharging
+                       || present   != self.lastPresent
+
+            guard changed else { return }
+            self.lastCharge   = chargePercent
+            self.lastStatus   = chargingStatus
+            self.lastTime     = timeStr
+            self.lastWatts    = powerWatts
+            self.lastCharging = charging
+            self.lastPresent  = present
+
             DispatchQueue.main.async {
-                self.chargePercent     = chargePercent
-                self.chargingStatus    = chargingStatus
-                self.healthPercent     = healthPercent
-                self.cycleCount        = cycleCount
-                self.nominalCapacityMAh = maxMAh
-                self.designCapacityMAh = designMAh
-                self.timeRemaining     = timeStr
-                self.powerWatts        = powerWatts
-                self.isCharging        = charging
-                self.isPresent         = present
+                self.chargePercent  = chargePercent
+                self.chargingStatus = chargingStatus
+                self.timeRemaining  = timeStr
+                self.powerWatts     = powerWatts
+                self.isCharging     = charging
+                self.isPresent      = present
             }
         }
     }

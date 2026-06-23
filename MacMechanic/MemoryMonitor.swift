@@ -37,6 +37,8 @@ class MemoryMonitor: ObservableObject {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
     }()
 
+    private let pageSize: UInt64
+    private let totalRAMBytes: UInt64
     private var pressureSource: DispatchSourceMemoryPressure?
     private var statsTimer: Timer?
     private let bgQueue = DispatchQueue(label: "com.macmechanic.vmstats", qos: .utility)
@@ -48,6 +50,8 @@ class MemoryMonitor: ObservableObject {
     private var lastFree: Double = -1
 
     private init() {
+        pageSize      = UInt64(vm_kernel_page_size)
+        totalRAMBytes = ProcessInfo.processInfo.physicalMemory
         setupPressureSource()
         startTimer()
     }
@@ -72,7 +76,7 @@ class MemoryMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 3.7, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }
@@ -91,7 +95,6 @@ class MemoryMonitor: ObservableObject {
 
             var vmStats = vm_statistics64()
             var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
-            let pageSize = UInt64(vm_kernel_page_size)
 
             let result = withUnsafeMutablePointer(to: &vmStats) {
                 $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
@@ -102,7 +105,6 @@ class MemoryMonitor: ObservableObject {
             guard result == KERN_SUCCESS else { return }
 
             let gb = 1_073_741_824.0
-            let totalRAMBytes = UInt64(ProcessInfo.processInfo.physicalMemory)
             let newSwap       = Double(vmStats.swapins + vmStats.swapouts) / gb
             let newCompressed = Double(vmStats.compressor_page_count) * Double(pageSize) / gb
             let newApp        = Double(vmStats.internal_page_count - vmStats.purgeable_count) * Double(pageSize) / gb
