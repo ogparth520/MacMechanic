@@ -146,7 +146,7 @@ class ProcessMonitor: ObservableObject {
                            memoryMB: p.memoryMB, cpuPercent: p.cpuPercent,
                            energySeconds: p.energySeconds)
             }
-            let topMem    = list.sorted { $0.memoryMB      > $1.memoryMB      }.prefix(5).map(cleaned)
+            let topMem    = list.sorted { $0.memoryMB      > $1.memoryMB      }.prefix(20).map(cleaned)
             let topCPU    = list.sorted { $0.cpuPercent    > $1.cpuPercent    }.prefix(5).map(cleaned)
             let topEnergy = list.sorted { $0.energySeconds > $1.energySeconds }.prefix(5).map(cleaned)
 

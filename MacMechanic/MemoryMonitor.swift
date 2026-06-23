@@ -60,7 +60,10 @@ class MemoryMonitor: ObservableObject {
         let src = DispatchSource.makeMemoryPressureSource(eventMask: .all, queue: .main)
         src.setEventHandler { [weak self] in
             guard let self else { return }
-            let flags = src.mask
+            // src.data is the event(s) that actually fired. src.mask is just
+            // the mask we registered (.all), so it always contains .critical
+            // and collapses every event to .critical — that was the bug.
+            let flags = src.data
             if flags.contains(.critical) {
                 self.pressureLevel = .critical
             } else if flags.contains(.warning) {
@@ -72,6 +75,29 @@ class MemoryMonitor: ObservableObject {
         }
         src.resume()
         pressureSource = src
+
+        // Memory pressure source only fires on transitions. If the system is
+        // already non-normal at launch, the handler never fires and we'd be
+        // stuck at .normal. Seed the current level from the kernel.
+        seedInitialPressureLevel()
+    }
+
+    private func seedInitialPressureLevel() {
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level",
+                           &level, &size, nil, 0) == 0
+        else { return }
+        // DISPATCH_MEMORYPRESSURE_NORMAL = 1, WARN = 2, CRITICAL = 4
+        let initial: PressureLevel
+        switch level {
+        case 4: initial = .critical
+        case 2: initial = .warning
+        default: initial = .normal
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.pressureLevel = initial
+        }
     }
 
     func startTimer() {

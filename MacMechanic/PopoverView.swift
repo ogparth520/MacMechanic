@@ -1,18 +1,5 @@
 import SwiftUI
-
-// MARK: - Tab
-
-private enum Tab: Int, CaseIterable {
-    case memory, battery, cpu, gpu
-    var label: String {
-        switch self {
-        case .memory:  return "Memory"
-        case .battery: return "Battery"
-        case .cpu:     return "CPU"
-        case .gpu:     return "GPU"
-        }
-    }
-}
+import AppKit
 
 // MARK: - Root
 
@@ -22,31 +9,91 @@ struct PopoverView: View {
     @ObservedObject var cpu: CPUMonitor
     @ObservedObject var processes: ProcessMonitor
 
-    @State private var tab: Tab = .memory
     @State private var isPaused: Bool = false
+    @State private var pressureHistory: [Double] = Array(repeating: 0, count: 30)
+    @State private var batteryHistory: [Double] = Array(repeating: 0, count: 30)
+
+    private let historyLimit = 60
+    // Memory pressure and battery percent rarely change, so .onReceive on
+    // @Published won't accumulate history. Drive sampling from a timer so
+    // every tick adds a fresh sample to both buffers.
+    private let sampleTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { t in
-                    Text(t.label).tag(t)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            VStack(spacing: 0) {
+                LazyVGrid(
+                        columns: [
+                            GridItem(.flexible(), spacing: 8),
+                            GridItem(.flexible(), spacing: 8)
+                        ],
+                        spacing: 8
+                    ) {
+                        StatCard(
+                            label: "CPU",
+                            value: String(format: "%.0f%%", cpu.overallPercent),
+                            history: padded(cpu.cpuHistory),
+                            peak: 100,
+                            colorFor: { v in
+                                switch v {
+                                case ..<50: return .green
+                                case ..<80: return .orange
+                                default:    return .red
+                                }
+                            }
+                        )
+                        StatCard(
+                            label: "Memory",
+                            value: String(format: "%.1f GB", monitor.memoryUsedGB),
+                            history: pressureHistory,
+                            // peak = 1 so the normalized pressure values
+                            // (0.30 / 0.65 / 1.00) translate directly to bar
+                            // height: Normal 30%, Warning 65%, Critical 100%.
+                            peak: 1,
+                            colorFor: { v in
+                                // v: 0.30 = Normal, 0.65 = Warning, 1.00 = Critical
+                                switch v {
+                                case ..<0.50: return .green
+                                case ..<0.85: return .orange
+                                default:      return .red
+                                }
+                            }
+                        )
+                        StatCard(
+                            label: "Battery",
+                            value: battery.isPresent ? "\(battery.chargePercent)%" : "—",
+                            history: batteryHistory,
+                            peak: 100,
+                            colorFor: { v in
+                                switch v {
+                                case ..<20: return .red
+                                case ..<50: return .orange
+                                default:    return .green
+                                }
+                            }
+                        )
+                        StatCard(
+                            label: "GPU",
+                            value: "\(cpu.gpuPercent)%",
+                            history: padded(cpu.gpuHistory),
+                            peak: 100,
+                            colorFor: { v in
+                                switch v {
+                                case ..<50: return .green
+                                case ..<80: return .orange
+                                default:    return .red
+                                }
+                            }
+                        )
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 12)
 
-            Divider()
+                    Divider()
 
-            Group {
-                switch tab {
-                case .memory:  MemoryTabView(monitor: monitor, processes: processes)
-                case .battery: BatteryTabView(battery: battery, processes: processes)
-                case .cpu:     CPUTabView(cpu: cpu, processes: processes)
-                case .gpu:     GPUTabView(cpu: cpu)
-                }
+                ProcessListView(processes: processes.byMemory)
+                    .padding(.bottom, 8)
             }
-            .frame(maxWidth: .infinity, alignment: .top)
 
             Divider()
 
@@ -66,264 +113,296 @@ struct PopoverView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .frame(width: 280)
+        .frame(width: 300)
         .fixedSize(horizontal: false, vertical: true)
+        .onReceive(monitor.$pressureLevel) { newValue in
+            print("[MacMechanic] pressureLevel changed → \(newValue)")
+        }
+        .onReceive(sampleTimer) { _ in
+            appendSample(
+                pressureSampleValue(monitor.pressureLevel),
+                into: &pressureHistory
+            )
+            if battery.isPresent {
+                appendSample(Double(battery.chargePercent), into: &batteryHistory)
+            }
+        }
+    }
+
+    private func appendSample(_ value: Double, into history: inout [Double]) {
+        history.append(value)
+        if history.count > historyLimit {
+            history.removeFirst(history.count - historyLimit)
+        }
+    }
+
+    private func pressureSampleValue(_ level: PressureLevel) -> Double {
+        // Encode pressure as a normalized bar height: Normal 30%, Warning 65%,
+        // Critical 100% (used with peak = 1 on the Memory card).
+        switch level {
+        case .normal:   return 0.30
+        case .warning:  return 0.65
+        case .critical: return 1.00
+        }
+    }
+
+    /// Left-pads `history` with zero samples so freshly-launched cards render
+    /// a full row of bars instead of leading empty placeholders.
+    private func padded(_ history: [Double], to count: Int = 30) -> [Double] {
+        if history.count >= count { return history }
+        return Array(repeating: 0, count: count - history.count) + history
     }
 }
 
-// MARK: - Memory tab
+// MARK: - Stat card
 
-private struct MemoryTabView: View {
-    @ObservedObject var monitor: MemoryMonitor
-    @ObservedObject var processes: ProcessMonitor
+private struct StatCard: View {
+    let label: String
+    let value: String
+    let history: [Double]
+    let peak: Double
+    let colorFor: (Double) -> Color
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Hero
-            VStack(spacing: 2) {
-                Text(monitor.pressureLevel.label)
-                    .font(.title2.bold())
-                    .foregroundColor(Color(monitor.pressureLevel.color))
-                Text("Memory Pressure")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text(label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text(value)
+                    .font(.callout.bold().monospacedDigit())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-
-            Divider()
-
-            // Stats
-            VStack(spacing: 0) {
-                statRow("Memory Used",  gbStr(monitor.memoryUsedGB), labelColor: .primary)
-                statRow("Cached Files", gbStr(monitor.cachedFilesGB))
-                statRow("App Memory",   gbStr(monitor.appMemoryGB))
-                statRow("Wired",        gbStr(monitor.wiredGB))
-                statRow("Compressed",   gbStr(monitor.compressedGB))
-                statRow("Swap Used",    gbStr(monitor.swapUsedGB))
-                statRow("Total RAM",    gbStr(monitor.totalRAMGB))
-            }
-            .padding(.vertical, 5)
-
-            Divider()
-
-            ProcessListView(processes: processes.byMemory, valueKey: \.memoryFormatted)
+            BarHistoryView(values: history, peak: peak, colorFor: colorFor)
+                .frame(height: 48)
         }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.10))
+        )
     }
 }
 
-// MARK: - Battery tab
+// MARK: - Mini bar graph
 
-private struct BatteryTabView: View {
-    @ObservedObject var battery: BatteryMonitor
-    @ObservedObject var processes: ProcessMonitor
+private struct BarHistoryView: View {
+    let values: [Double]
+    let peak: Double
+    let colorFor: (Double) -> Color
+
+    private let slotCount = 24
+    private let spacing: CGFloat = 2
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !battery.isPresent {
-                Spacer()
-                Text("No Battery").foregroundStyle(.secondary)
-                Spacer()
-            } else {
-                // Hero
-                VStack(spacing: 2) {
-                    Text("\(battery.chargePercent)%")
-                        .font(.title2.bold())
-                    Text("Battery · \(battery.chargingStatus)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
+        GeometryReader { geo in
+            let totalSpacing = spacing * CGFloat(slotCount - 1)
+            let barWidth = max(
+                (geo.size.width - totalSpacing) / CGFloat(slotCount),
+                1
+            )
 
-                Divider()
+            let recent = Array(values.suffix(slotCount))
+            let leadingPad = slotCount - recent.count
 
-                // Stats
-                VStack(spacing: 0) {
-                    statRow("Health",   String(format: "%.1f%%", battery.healthPercent))
-                    statRow("Cycles",   "\(battery.cycleCount)")
-                    statRow("Capacity", "\(battery.nominalCapacityMAh) / \(battery.designCapacityMAh) mAh")
-                    statRow(battery.isCharging ? "Time to Full" : "Time Left",
-                            battery.timeRemaining)
-                    statRow(battery.isCharging ? "Charging" : "Power Draw",
-                            String(format: "%.1f W", battery.powerWatts))
-                }
-                .padding(.vertical, 5)
+            HStack(alignment: .bottom, spacing: spacing) {
+                ForEach(0..<slotCount, id: \.self) { i in
+                    let v: Double = i < leadingPad ? 0 : recent[i - leadingPad]
+                    let normalized: CGFloat = peak > 0
+                        ? max(0, min(CGFloat(v / peak), 1))
+                        : 0
+                    let barHeight = max(geo.size.height * normalized, 1)
+                    // Treat any zero sample as a neutral baseline — keeps the
+                    // pre-fill slots and idle states reading as "no data"
+                    // rather than triggering the lowest threshold color.
+                    let fill: Color = v <= 0
+                        ? Color.gray.opacity(0.35)
+                        : colorFor(v)
 
-                Divider()
-
-                ProcessListView(processes: processes.byEnergy, valueKey: \.energyFormatted)
-            }
-        }
-    }
-}
-
-// MARK: - CPU tab
-
-private struct CPUTabView: View {
-    @ObservedObject var cpu: CPUMonitor
-    @ObservedObject var processes: ProcessMonitor
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Hero
-            VStack(spacing: 2) {
-                Text(String(format: "%.0f%%", cpu.overallPercent))
-                    .font(.title2.bold())
-                Text("CPU")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
-            SparklineView(values: cpu.cpuHistory)
-                .frame(height: 36)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-
-            Divider()
-
-            // Stats
-            VStack(spacing: 0) {
-                statRow("System", String(format: "%.0f%%", cpu.systemPercent))
-                statRow("User",   String(format: "%.0f%%", cpu.userPercent))
-                statRow("Idle",   String(format: "%.0f%%", cpu.idlePercent))
-                statRow("P-Cores (\(cpu.pCoreCount))",
-                        String(format: "%.0f%%", cpu.pCorePercent))
-                statRow("E-Cores (\(cpu.eCoreCount))",
-                        String(format: "%.0f%%", cpu.eCorePercent))
-            }
-            .padding(.vertical, 5)
-
-            Divider()
-
-            ProcessListView(processes: processes.byCPU, valueKey: \.cpuFormatted)
-        }
-    }
-}
-
-// MARK: - GPU tab
-
-private struct GPUTabView: View {
-    @ObservedObject var cpu: CPUMonitor
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Hero
-            VStack(spacing: 2) {
-                Text("\(cpu.gpuPercent)%")
-                    .font(.title2.bold())
-                Text(cpu.gpuModelName.isEmpty ? "GPU" : cpu.gpuModelName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
-            SparklineView(values: cpu.gpuHistory)
-                .frame(height: 36)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-
-            Divider()
-
-            // Stats
-            VStack(spacing: 0) {
-                statRow("Tiler",    "\(cpu.tilerPercent)%")
-                statRow("Renderer", "\(cpu.rendererPercent)%")
-                if cpu.gpuMemoryGB > 0 {
-                    statRow("Memory", String(format: "%.1f GB", cpu.gpuMemoryGB))
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(fill)
+                        .frame(width: barWidth, height: barHeight)
                 }
             }
-            .padding(.vertical, 5)
+            .frame(
+                width: geo.size.width,
+                height: geo.size.height,
+                alignment: .bottomLeading
+            )
         }
     }
-}
-
-// MARK: - Shared helpers
-
-@ViewBuilder
-private func statRow(_ label: String, _ value: String,
-                     labelColor: Color = .secondary) -> some View {
-    HStack(spacing: 4) {
-        Text(label).foregroundStyle(labelColor)
-        Spacer(minLength: 8)
-        Text(value).foregroundStyle(.primary)
-    }
-    .font(.body)
-    .padding(.horizontal, 16)
-    .padding(.vertical, 3)
-}
-
-private func gbStr(_ gb: Double) -> String {
-    String(format: "%.1f GB", gb)
 }
 
 // MARK: - Process list
 
+private enum ProcessFilter: String, CaseIterable, Identifiable {
+    case apps = "Apps"
+    case all  = "All Processes"
+    var id: String { rawValue }
+}
+
+private enum ProcessSort: String, CaseIterable, Identifiable {
+    case memory    = "Memory"
+    case cpuUsage  = "CPU Usage"
+    case cpuTime   = "CPU Time"
+    case name      = "Name"
+    case startTime = "Start Time"
+    var id: String { rawValue }
+}
+
 private struct ProcessListView: View {
     let processes: [AppProcess]
-    let valueKey: KeyPath<AppProcess, String>
+
+    @State private var filter: ProcessFilter = .apps
+    @State private var sort: ProcessSort = .memory
+
+    // Subprocesses spawned by user apps that show up in
+    // NSWorkspace.runningApplications but aren't standalone apps.
+    private static let appsFilterExclusions: Set<String> = [
+        "WebKit WebContent",
+        "WebKit GPU"
+    ]
+
+    private var visibleProcesses: [AppProcess] {
+        var list = processes
+        if filter == .apps {
+            let appPIDs = Set(
+                NSWorkspace.shared.runningApplications.map { $0.processIdentifier }
+            )
+            list = list.filter { p in
+                appPIDs.contains(p.id) && !Self.appsFilterExclusions.contains(p.name)
+            }
+        }
+        switch sort {
+        case .memory:
+            list.sort { $0.memoryMB > $1.memoryMB }
+        case .cpuUsage:
+            list.sort { $0.cpuPercent > $1.cpuPercent }
+        case .cpuTime:
+            list.sort { $0.energySeconds > $1.energySeconds }
+        case .name:
+            list.sort {
+                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        case .startTime:
+            list.sort {
+                let a = NSRunningApplication(processIdentifier: $0.id)?.launchDate ?? .distantPast
+                let b = NSRunningApplication(processIdentifier: $1.id)?.launchDate ?? .distantPast
+                return a > b
+            }
+        }
+        return list
+    }
+
+    private func displayValue(for p: AppProcess) -> String {
+        switch sort {
+        case .cpuUsage:  return p.cpuFormatted
+        case .cpuTime:   return String(format: "%.1fs", p.energySeconds)
+        case .startTime: return elapsedSinceLaunch(p.id)
+        default:         return p.memoryFormatted  // memory, name
+        }
+    }
+
+    /// Time since the running application launched, formatted like "2h 34m",
+    /// "45m", or "1d 3h". Returns "—" when the process isn't tracked by
+    /// NSWorkspace (non-app helpers).
+    private func elapsedSinceLaunch(_ pid: Int32) -> String {
+        guard let launchDate = NSRunningApplication(processIdentifier: pid)?.launchDate
+        else { return "—" }
+        let seconds = Int(Date().timeIntervalSince(launchDate))
+        guard seconds >= 0 else { return "—" }
+        let days  = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let mins  = (seconds % 3_600) / 60
+        if days  > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(mins)m" }
+        return "\(mins)m"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("TOP PROCESSES")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+            HStack(alignment: .center, spacing: 8) {
+                Picker("Filter", selection: $filter) {
+                    ForEach(ProcessFilter.allCases) { f in
+                        Text(f.rawValue).tag(f)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
 
-            if processes.isEmpty {
-                Text("Loading…")
+                Spacer(minLength: 8)
+
+                Picker("Sort", selection: $sort) {
+                    ForEach(ProcessSort.allCases) { s in
+                        Text(s.rawValue).tag(s)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            let list = visibleProcesses
+            if list.isEmpty {
+                Text(processes.isEmpty ? "Loading…" : "No matching processes")
                     .font(.body)
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 4)
             } else {
-                ForEach(processes) { p in
-                    HStack(spacing: 4) {
-                        Text(p.name)
-                            .font(.body)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 8)
-                        Text(p[keyPath: valueKey])
-                            .font(.body.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(list) { p in
+                            HStack(spacing: 8) {
+                                ProcessIconView(pid: p.id)
+                                Text(p.name)
+                                    .font(.body)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 8)
+                                Text(displayValue(for: p))
+                                    .font(.body.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 3)
+                        }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 3)
                 }
+                .frame(maxHeight: 360)
             }
         }
     }
 }
 
-// MARK: - Sparkline
+// MARK: - Process icon
 
-private struct SparklineView: View {
-    let values: [Double]
+private struct ProcessIconView: View {
+    let pid: Int32
 
     var body: some View {
-        Canvas { context, size in
-            guard values.count > 1 else { return }
-            let peak = max(values.max() ?? 100, 5)
-            var path = Path()
-            for (i, v) in values.enumerated() {
-                let x = size.width * CGFloat(i) / CGFloat(values.count - 1)
-                let y = size.height * (1 - CGFloat(v) / CGFloat(peak))
-                if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
-                else       { path.addLine(to: CGPoint(x: x, y: y)) }
+        Group {
+            if let app = NSRunningApplication(processIdentifier: pid),
+               let nsImage = app.icon {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+            } else {
+                Image(systemName: "gearshape.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.secondary)
+                    .padding(2)
             }
-            context.stroke(path, with: .color(.primary.opacity(0.7)), lineWidth: 1.5)
         }
-        .background(.quaternary)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .frame(width: 20, height: 20)
     }
 }
