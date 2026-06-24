@@ -102,7 +102,8 @@ class MemoryMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        let interval = SettingsStore.shared.pollingInterval
+        statsTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }
@@ -110,6 +111,11 @@ class MemoryMonitor: ObservableObject {
     func stopTimer() {
         statsTimer?.invalidate()
         statsTimer = nil
+    }
+
+    func restartTimer() {
+        stopTimer()
+        startTimer()
     }
 
     var isPaused: Bool = false

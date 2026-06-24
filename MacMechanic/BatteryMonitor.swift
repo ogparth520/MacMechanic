@@ -56,7 +56,7 @@ class BatteryMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        timer = Timer.scheduledTimer(withTimeInterval: 11.9, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }

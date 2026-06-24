@@ -92,7 +92,8 @@ class CPUMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        let interval = SettingsStore.shared.pollingInterval
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }
@@ -100,6 +101,11 @@ class CPUMonitor: ObservableObject {
     func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+
+    func restartTimer() {
+        stopTimer()
+        startTimer()
     }
 
     var isPaused: Bool = false

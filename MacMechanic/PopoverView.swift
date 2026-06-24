@@ -10,6 +10,7 @@ struct PopoverView: View {
     @ObservedObject var processes: ProcessMonitor
 
     @State private var isPaused: Bool = false
+    @State private var showingSettings: Bool = false
     @State private var pressureHistory: [Double] = Array(repeating: 0, count: 30)
     @State private var batteryHistory: [Double] = Array(repeating: 0, count: 30)
 
@@ -20,6 +21,39 @@ struct PopoverView: View {
     private let sampleTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        Group {
+            if showingSettings {
+                SettingsView(showingSettings: $showingSettings)
+            } else {
+                mainContent
+            }
+        }
+        .frame(width: 300)
+        .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: showingSettings) { _ in
+            // Posting on the next runloop tick lets SwiftUI finish laying out
+            // the new view so NSHostingView reports the updated intrinsic size.
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: .popoverContentSizeShouldUpdate, object: nil
+                )
+            }
+        }
+        .onReceive(monitor.$pressureLevel) { newValue in
+            print("[MacMechanic] pressureLevel changed → \(newValue)")
+        }
+        .onReceive(sampleTimer) { _ in
+            appendSample(
+                pressureSampleValue(monitor.pressureLevel),
+                into: &pressureHistory
+            )
+            if battery.isPresent {
+                appendSample(Double(battery.chargePercent), into: &batteryHistory)
+            }
+        }
+    }
+
+    private var mainContent: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
                 LazyVGrid(
@@ -97,7 +131,7 @@ struct PopoverView: View {
 
             Divider()
 
-            HStack {
+            HStack(spacing: 8) {
                 Button {
                     isPaused.toggle()
                     MemoryMonitor.shared.isPaused   = isPaused
@@ -107,25 +141,17 @@ struct PopoverView: View {
                 } label: {
                     Image(systemName: isPaused ? "play.fill" : "pause.fill")
                 }
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Settings")
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-        }
-        .frame(width: 300)
-        .fixedSize(horizontal: false, vertical: true)
-        .onReceive(monitor.$pressureLevel) { newValue in
-            print("[MacMechanic] pressureLevel changed → \(newValue)")
-        }
-        .onReceive(sampleTimer) { _ in
-            appendSample(
-                pressureSampleValue(monitor.pressureLevel),
-                into: &pressureHistory
-            )
-            if battery.isPresent {
-                appendSample(Double(battery.chargePercent), into: &batteryHistory)
-            }
         }
     }
 
@@ -485,5 +511,65 @@ private struct ProcessIconView: View {
             }
         }
         .frame(width: 20, height: 20)
+    }
+}
+
+// MARK: - Settings
+
+extension Notification.Name {
+    static let popoverContentSizeShouldUpdate =
+        Notification.Name("MacMechanic.popoverContentSizeShouldUpdate")
+}
+
+private struct SettingsView: View {
+    @Binding var showingSettings: Bool
+    @ObservedObject private var settings = SettingsStore.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    showingSettings = false
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+
+                Text("Settings")
+                    .font(.headline)
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 18) {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { settings.launchAtLogin },
+                    set: { settings.setLaunchAtLogin($0) }
+                ))
+                .toggleStyle(.switch)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Polling interval")
+                        .font(.body)
+                    Picker("Polling interval", selection: $settings.pollingInterval) {
+                        Text("1s").tag(TimeInterval(1))
+                        Text("5s").tag(TimeInterval(5))
+                        Text("10s").tag(TimeInterval(10))
+                        Text("15s").tag(TimeInterval(15))
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 18)
+        }
     }
 }

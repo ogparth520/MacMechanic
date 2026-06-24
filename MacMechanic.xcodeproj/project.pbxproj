@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		049E83F52FEB9414007FB762 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 049E83F42FEB9414007FB762 /* SettingsStore.swift */; };
 		A001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = F001 /* main.swift */; };
 		A002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F002 /* AppDelegate.swift */; };
 		A003 /* MemoryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F003 /* MemoryMonitor.swift */; };
@@ -19,6 +20,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		049E83F42FEB9414007FB762 /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
 		F001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		F002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		F003 /* MemoryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryMonitor.swift; sourceTree = "<group>"; };
@@ -72,6 +74,7 @@
 				F008 /* CPUMonitor.swift */,
 				F009 /* ProcessMonitor.swift */,
 				F010 /* Assets.xcassets */,
+				049E83F42FEB9414007FB762 /* SettingsStore.swift */,
 			);
 			path = MacMechanic;
 			sourceTree = "<group>";
@@ -149,6 +152,7 @@
 				A002 /* AppDelegate.swift in Sources */,
 				A003 /* MemoryMonitor.swift in Sources */,
 				A004 /* StatusBarController.swift in Sources */,
+				049E83F52FEB9414007FB762 /* SettingsStore.swift in Sources */,
 				A005 /* PopoverView.swift in Sources */,
 				A006 /* BatteryMonitor.swift in Sources */,
 				A007 /* CPUMonitor.swift in Sources */,

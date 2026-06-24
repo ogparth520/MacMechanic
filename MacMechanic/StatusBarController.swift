@@ -20,6 +20,17 @@ final class StatusBarController: NSObject {
         super.init()
         setupStatusItem()
         setupPanel()
+        NotificationCenter.default.addObserver(
+            forName: .popoverContentSizeShouldUpdate,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.resizePanelToContent()
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func setupStatusItem() {
@@ -133,6 +144,23 @@ final class StatusBarController: NSObject {
         panel.orderOut(nil)
         removeDismissMonitors()
         lastDismissAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func resizePanelToContent() {
+        guard panel.isVisible else { return }
+        hostingView.invalidateIntrinsicContentSize()
+        hostingView.layoutSubtreeIfNeeded()
+        let intrinsic = hostingView.intrinsicContentSize
+        let width = intrinsic.width > 0 ? intrinsic.width : 300
+        let height = intrinsic.height > 0 ? intrinsic.height : 400
+
+        // Pin the panel's top edge so the popover grows/shrinks downward
+        // beneath the menu bar instead of jumping vertically.
+        var frame = panel.frame
+        let topY = frame.maxY
+        frame.size = NSSize(width: width, height: height)
+        frame.origin.y = topY - height
+        panel.setFrame(frame, display: true)
     }
 
     private func installDismissMonitors() {
