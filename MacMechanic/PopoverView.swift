@@ -17,7 +17,7 @@ struct PopoverView: View {
     // Memory pressure and battery percent rarely change, so .onReceive on
     // @Published won't accumulate history. Drive sampling from a timer so
     // every tick adds a fresh sample to both buffers.
-    private let sampleTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    private let sampleTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,7 +91,7 @@ struct PopoverView: View {
 
                     Divider()
 
-                ProcessListView(processes: processes.byMemory)
+                ProcessListView(processMonitor: processes)
                     .padding(.bottom, 8)
             }
 
@@ -246,14 +246,12 @@ private enum ProcessFilter: String, CaseIterable, Identifiable {
 private enum ProcessSort: String, CaseIterable, Identifiable {
     case memory    = "Memory"
     case cpuUsage  = "CPU Usage"
-    case cpuTime   = "CPU Time"
-    case name      = "Name"
     case startTime = "Start Time"
     var id: String { rawValue }
 }
 
 private struct ProcessListView: View {
-    let processes: [AppProcess]
+    @ObservedObject var processMonitor: ProcessMonitor
 
     @State private var filter: ProcessFilter = .apps
     @State private var sort: ProcessSort = .memory
@@ -266,10 +264,12 @@ private struct ProcessListView: View {
     ]
 
     private var visibleProcesses: [AppProcess] {
-        var list = processes
+        var list = processMonitor.allProcesses
         if filter == .apps {
             let appPIDs = Set(
-                NSWorkspace.shared.runningApplications.map { $0.processIdentifier }
+                NSWorkspace.shared.runningApplications
+                    .filter { $0.activationPolicy == .regular }
+                    .map { $0.processIdentifier }
             )
             list = list.filter { p in
                 appPIDs.contains(p.id) && !Self.appsFilterExclusions.contains(p.name)
@@ -280,12 +280,6 @@ private struct ProcessListView: View {
             list.sort { $0.memoryMB > $1.memoryMB }
         case .cpuUsage:
             list.sort { $0.cpuPercent > $1.cpuPercent }
-        case .cpuTime:
-            list.sort { $0.energySeconds > $1.energySeconds }
-        case .name:
-            list.sort {
-                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
         case .startTime:
             list.sort {
                 let a = NSRunningApplication(processIdentifier: $0.id)?.launchDate ?? .distantPast
@@ -298,10 +292,9 @@ private struct ProcessListView: View {
 
     private func displayValue(for p: AppProcess) -> String {
         switch sort {
+        case .memory:    return p.memoryFormatted
         case .cpuUsage:  return p.cpuFormatted
-        case .cpuTime:   return String(format: "%.1fs", p.energySeconds)
         case .startTime: return elapsedSinceLaunch(p.id)
-        default:         return p.memoryFormatted  // memory, name
         }
     }
 
@@ -352,7 +345,7 @@ private struct ProcessListView: View {
 
             let list = visibleProcesses
             if list.isEmpty {
-                Text(processes.isEmpty ? "Loading…" : "No matching processes")
+                Text(processMonitor.allProcesses.isEmpty ? "Loading…" : "No matching processes")
                     .font(.body)
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 16)
@@ -361,21 +354,14 @@ private struct ProcessListView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(list) { p in
-                            HStack(spacing: 8) {
-                                ProcessIconView(pid: p.id)
-                                Text(p.name)
-                                    .font(.body)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer(minLength: 8)
-                                Text(displayValue(for: p))
-                                    .font(.body.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 3)
+                            ProcessRowView(
+                                process: p,
+                                displayValue: displayValue(for: p),
+                                processMonitor: processMonitor
+                            )
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 360)
             }
@@ -383,15 +369,110 @@ private struct ProcessListView: View {
     }
 }
 
+// MARK: - Process row
+
+private struct ProcessRowView: View {
+    let process: AppProcess
+    let displayValue: String
+    @ObservedObject var processMonitor: ProcessMonitor
+
+    @State private var isHovering = false
+    @State private var forceQuitSucceeded = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProcessIconView(pid: process.id, name: process.name)
+            Text(process.name)
+                .font(.body)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            if forceQuitSucceeded {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.green)
+            } else if isHovering {
+                Button {
+                    confirmForceQuit()
+                } label: {
+                    Image(systemName: "power")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Force Quit")
+            }
+            Text(displayValue)
+                .font(.body.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+    }
+
+    private func confirmForceQuit() {
+        print("[MacMechanic] Force Quit button clicked: name=\(process.name), pid=\(process.id)")
+
+        let alert = NSAlert()
+        alert.messageText = "Force Quit Application?"
+        alert.informativeText = "Are you sure you want to force quit \(process.name)?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Force Quit")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            print("[MacMechanic] Force Quit cancelled: name=\(process.name), pid=\(process.id)")
+            return
+        }
+
+        print("[MacMechanic] Force Quit confirmed: name=\(process.name), pid=\(process.id)")
+        if let message = processMonitor.forceQuit(process) {
+            forceQuitSucceeded = false
+            showForceQuitError(message)
+        } else {
+            forceQuitSucceeded = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                forceQuitSucceeded = false
+            }
+        }
+    }
+
+    private func showForceQuitError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Unable to Force Quit"
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
 // MARK: - Process icon
 
 private struct ProcessIconView: View {
     let pid: Int32
+    let name: String
+
+    private static let safariIcon: NSImage? = {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") else {
+            return nil
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }()
+
+    private var iconImage: NSImage? {
+        if name == "WebKit WebContent" || name == "WebKit Networking" || name.hasPrefix("Safari ") {
+            return Self.safariIcon
+        }
+        return NSRunningApplication(processIdentifier: pid)?.icon
+    }
 
     var body: some View {
         Group {
-            if let app = NSRunningApplication(processIdentifier: pid),
-               let nsImage = app.icon {
+            if let nsImage = iconImage {
                 Image(nsImage: nsImage)
                     .resizable()
                     .interpolation(.high)

@@ -92,7 +92,7 @@ class CPUMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }

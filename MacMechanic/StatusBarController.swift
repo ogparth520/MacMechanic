@@ -3,6 +3,7 @@ import SwiftUI
 
 final class StatusBarController: NSObject {
     private var statusItem: NSStatusItem!
+    private var statusGaugeHostingView: NSHostingView<StatusItemGaugeView>!
     private var panel: DropdownPanel!
     private var hostingView: NSHostingView<PopoverView>!
     private var globalMonitor: Any?
@@ -22,7 +23,8 @@ final class StatusBarController: NSObject {
     }
 
     private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let itemWidth: CGFloat = 112
+        statusItem = NSStatusBar.system.statusItem(withLength: itemWidth)
         statusItem.isVisible = true
 
         guard let button = statusItem.button else {
@@ -30,17 +32,25 @@ final class StatusBarController: NSObject {
             return
         }
 
-        if let image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill",
-                               accessibilityDescription: "MacMechanic") {
-            image.isTemplate = true
-            button.image = image
-        } else {
-            button.title = "MM"
-        }
-
+        button.image = nil
+        button.title = ""
         button.action = #selector(togglePanel(_:))
         button.target = self
-        print("[MacMechanic] Status item created — image: \(button.image != nil ? "set" : "nil")")
+
+        statusGaugeHostingView = NSHostingView(
+            rootView: StatusItemGaugeView(cpu: cpuMonitor, memory: monitor)
+        )
+        statusGaugeHostingView.translatesAutoresizingMaskIntoConstraints = false
+        statusGaugeHostingView.wantsLayer = true
+        button.addSubview(statusGaugeHostingView)
+        NSLayoutConstraint.activate([
+            statusGaugeHostingView.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            statusGaugeHostingView.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            statusGaugeHostingView.topAnchor.constraint(equalTo: button.topAnchor),
+            statusGaugeHostingView.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+        ])
+
+        print("[MacMechanic] Status item created — live gauges enabled")
     }
 
     private func setupPanel() {
@@ -136,7 +146,7 @@ final class StatusBarController: NSObject {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
             guard let self = self else { return event }
-            if event.window !== self.panel {
+            if NSApp.modalWindow == nil, event.window !== self.panel {
                 self.hidePanel()
             }
             return event
@@ -146,6 +156,65 @@ final class StatusBarController: NSObject {
     private func removeDismissMonitors() {
         if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
         if let m = localMonitor  { NSEvent.removeMonitor(m); localMonitor  = nil }
+    }
+}
+
+// MARK: - Status item gauge
+
+private struct StatusItemGaugeView: View {
+    @ObservedObject var cpu: CPUMonitor
+    @ObservedObject var memory: MemoryMonitor
+
+    private var memoryPercent: Double {
+        guard memory.totalRAMGB > 0 else { return 0 }
+        return min(max(memory.memoryUsedGB / memory.totalRAMGB * 100, 0), 100)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            StatusMetricGauge(label: "CPU", percent: cpu.overallPercent)
+            StatusMetricGauge(label: "GPU", percent: Double(cpu.gpuPercent))
+            StatusMetricGauge(label: "MEM", percent: memoryPercent)
+        }
+        .padding(.horizontal, 5)
+        .frame(width: 112, height: NSStatusBar.system.thickness)
+    }
+}
+
+private struct StatusMetricGauge: View {
+    let label: String
+    let percent: Double
+
+    private let barCount = 5
+
+    private var activeBars: Int {
+        guard percent > 0 else { return 0 }
+        return min(barCount, max(1, Int(ceil(percent / 100 * Double(barCount)))))
+    }
+
+    private var fillColor: Color {
+        switch percent {
+        case ..<50: return .green
+        case ..<80: return .orange
+        default:    return .red
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .center, spacing: 1) {
+            Text(label)
+                .font(.system(size: 8, weight: .bold))
+                .lineLimit(1)
+            HStack(spacing: 1) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(index < activeBars ? fillColor : Color.secondary.opacity(0.28))
+                        .frame(width: 4, height: 4)
+                }
+            }
+        }
+        .foregroundStyle(.primary)
+        .frame(width: 30)
     }
 }
 

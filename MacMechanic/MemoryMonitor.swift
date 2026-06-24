@@ -102,7 +102,7 @@ class MemoryMonitor: ObservableObject {
 
     func startTimer() {
         fetchStats()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 3.7, repeats: true) { [weak self] _ in
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
     }

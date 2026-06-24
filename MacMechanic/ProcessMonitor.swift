@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Darwin
 
 struct AppProcess: Identifiable {
@@ -27,6 +28,7 @@ struct AppProcess: Identifiable {
 
 class ProcessMonitor: ObservableObject {
     static let shared = ProcessMonitor()
+    @Published var allProcesses: [AppProcess] = []
     @Published var byMemory: [AppProcess] = []
     @Published var byCPU: [AppProcess] = []
     @Published var byEnergy: [AppProcess] = []
@@ -35,8 +37,8 @@ class ProcessMonitor: ObservableObject {
     private let bgQueue = DispatchQueue(label: "com.macmechanic.process", qos: .utility)
     private var prevCPUNs: [Int32: UInt64] = [:]
     private var prevSampleDate = Date()
-    // PID cache: (pid, name) pairs that passed resource filter on the last full scan.
-    // Incremental ticks reuse this list to avoid proc_listpids + proc_name on all PIDs.
+    // PID cache from the last full scan. Incremental ticks reuse this list to avoid
+    // proc_listpids + proc_name on every refresh.
     private var pidNameCache: [(pid: Int32, name: String)] = []
     private var tickCount: Int = 0
 
@@ -46,7 +48,7 @@ class ProcessMonitor: ObservableObject {
 
     func startTimer() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 7.3, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
@@ -57,6 +59,60 @@ class ProcessMonitor: ObservableObject {
     }
 
     var isPaused: Bool = false
+
+    func forceQuit(_ process: AppProcess) -> String? {
+        let pid = pid_t(process.id)
+        let currentPID = getpid()
+
+        print("[MacMechanic] Force Quit selected: name=\(process.name), pid=\(pid)")
+        print("[MacMechanic] Force Quit attempt: targetPID=\(pid), appPID=\(currentPID)")
+
+        guard pid > 0 else {
+            let message = "Invalid process identifier: \(pid)."
+            print("[MacMechanic] Force Quit failed: \(message)")
+            return message
+        }
+
+        guard pid != currentPID else {
+            let message = "MacMechanic cannot force quit itself."
+            print("[MacMechanic] Force Quit blocked: target PID matches app PID")
+            return message
+        }
+
+        guard kill(pid, 0) == 0 else {
+            let error = errno
+            let detail = String(cString: strerror(error))
+            let message = error == EPERM
+                ? "macOS denied permission to force quit \(process.name). \(detail)"
+                : detail
+            print("[MacMechanic] Force Quit failed before termination: errno=\(error), message=\(message)")
+            return message
+        }
+
+        if let app = NSRunningApplication(processIdentifier: pid), app.processIdentifier == pid {
+            print("[MacMechanic] Force Quit using NSRunningApplication.forceTerminate: name=\(process.name), pid=\(pid)")
+            if app.forceTerminate() {
+                print("[MacMechanic] Force Quit succeeded: name=\(process.name), pid=\(pid)")
+                refresh()
+                return nil
+            }
+            print("[MacMechanic] NSRunningApplication.forceTerminate returned false; falling back to SIGKILL")
+        }
+
+        guard kill(pid, SIGKILL) == 0 else {
+            let error = errno
+            let detail = String(cString: strerror(error))
+            let message = error == EPERM
+                ? "macOS denied permission to force quit \(process.name). \(detail)"
+                : detail
+            print("[MacMechanic] Force Quit failed: errno=\(error), message=\(message)")
+            return message
+        }
+
+        print("[MacMechanic] Force Quit succeeded: name=\(process.name), pid=\(pid)")
+        refresh()
+        return nil
+    }
 
     private func refresh() {
         guard !isPaused else { return }
@@ -71,10 +127,9 @@ class ProcessMonitor: ObservableObject {
 
             var nameBuf = [CChar](repeating: 0, count: 2048)
 
-            // Full scan: enumerate every PID, filter by name, then by resources.
-            // The resource-significant survivors are cached for the next 4 incremental ticks.
-            // Incremental ticks skip proc_listpids + proc_name entirely, hitting only
-            // proc_pidinfo on ~30-50 known-active processes instead of 600+.
+            // Full scan: enumerate every PID and cache names for the next 4
+            // incremental ticks. Incremental ticks skip proc_listpids + proc_name
+            // and update resource counters for the cached process set.
             let candidates: [(pid: Int32, name: String)]
             if isFullScan {
                 let pidCountBytes = proc_listpids(1 /* PROC_ALL_PIDS */, 0, nil, 0)
@@ -114,7 +169,6 @@ class ProcessMonitor: ObservableObject {
                 let memMB   = Double(info.pti_resident_size) / 1_048_576
                 let totalNs = info.pti_total_user + info.pti_total_system
                 let prevNs  = self.prevCPUNs[pid] ?? totalNs  // no prev → treat delta as 0
-                guard memMB >= 10 || totalNs > prevNs else { continue }
 
                 newCPUNs[pid] = totalNs
 
@@ -130,7 +184,6 @@ class ProcessMonitor: ObservableObject {
             }
 
             if isFullScan {
-                // Cache the resource-significant survivors so incremental ticks are cheap.
                 // Replace prevCPUNs entirely to prune entries for exited processes.
                 self.pidNameCache = list.map { ($0.id, $0.name) }
                 self.prevCPUNs = newCPUNs
@@ -140,20 +193,23 @@ class ProcessMonitor: ObservableObject {
             }
             self.prevSampleDate = now
 
-            // Apply cleanName only to the top-5 winners (≤15 calls instead of 500+)
             func cleaned(_ p: AppProcess) -> AppProcess {
-                AppProcess(id: p.id, name: ProcessMonitor.cleanName(p.name),
-                           memoryMB: p.memoryMB, cpuPercent: p.cpuPercent,
-                           energySeconds: p.energySeconds)
+                let displayName = NSRunningApplication(processIdentifier: p.id)?.localizedName
+                    ?? ProcessMonitor.cleanName(p.name)
+                return AppProcess(id: p.id, name: displayName,
+                                  memoryMB: p.memoryMB, cpuPercent: p.cpuPercent,
+                                  energySeconds: p.energySeconds)
             }
-            let topMem    = list.sorted { $0.memoryMB      > $1.memoryMB      }.prefix(20).map(cleaned)
-            let topCPU    = list.sorted { $0.cpuPercent    > $1.cpuPercent    }.prefix(5).map(cleaned)
-            let topEnergy = list.sorted { $0.energySeconds > $1.energySeconds }.prefix(5).map(cleaned)
+            let cleanedList = list.map(cleaned)
+            let topMem      = cleanedList.sorted { $0.memoryMB      > $1.memoryMB      }.prefix(20)
+            let topCPU      = cleanedList.sorted { $0.cpuPercent    > $1.cpuPercent    }.prefix(20)
+            let topEnergy   = cleanedList.sorted { $0.energySeconds > $1.energySeconds }.prefix(20)
 
             DispatchQueue.main.async {
-                self.byMemory = topMem
-                self.byCPU    = topCPU
-                self.byEnergy = topEnergy
+                self.allProcesses = cleanedList
+                self.byMemory     = Array(topMem)
+                self.byCPU        = Array(topCPU)
+                self.byEnergy     = Array(topEnergy)
             }
         }
     }
